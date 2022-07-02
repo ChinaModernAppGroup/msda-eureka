@@ -261,7 +261,7 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
             schedule();
         }, pollInterval);
 
-        // Stop polling while undepllyment
+        // Stop polling while undeployment
         if (global.msdaeurekaOnPolling.includes(inputPoolName)) {
             logger.fine("MSDA: onPost, keep polling registry  for: " + inputPoolName);            
         } else {
