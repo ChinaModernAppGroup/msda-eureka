@@ -13,6 +13,7 @@
   language governing permissions and limitations under the License.
   
   Updated by Ping Xiong on May/15/2022.
+  Updated by Ping Xiong on Jun/30/2022, using global var for polling signal.
 */
 
 'use strict';
@@ -25,16 +26,15 @@ var mytmsh = require('./TmshUtil');
 const fetch = require('node-fetch');
 const Bluebird = require('bluebird');
 fetch.Promise = Bluebird;
-//var xml2js = require('xml2js');
-//var EventEmitter = require('events').EventEmitter;
-//var stopPollingEvent = new EventEmitter(); 
 
 // Setup a polling signal for audit.
-var fs = require('fs');
-const msdaeurekaOnPollingSignal = '/var/tmp/msdaeurekaOnPolling';
+//var fs = require('fs');
+//const msdaeurekaOnPollingSignal = '/var/tmp/msdaeurekaOnPolling';
+global.msdaeurekaOnPolling = [];
+
 
 //const pollInterval = 10000; // Interval for polling Registry registry.
-var stopPolling = false;
+//var stopPolling = false;
 
 // For functionnal verification
 //const poolName = 'pool_msda_demo';
@@ -75,20 +75,6 @@ msdaeurekaConfigProcessor.prototype.onStart = function (success) {
         eventChannel: this.eventChannel,
         restHelper: this.restHelper
     });
-
-    // Clear the polling signal for audit.
-    try {
-        fs.access(msdaeurekaOnPollingSignal, fs.constants.F_OK, function (err) {
-            if (err) {
-                logger.fine("MSDAeureka: OnStart, the polling signal is off. ", err.message);
-            } else {
-                logger.fine("MSDA eureka audit onStart: ConfigProcessor started, clear the signal.");
-                fs.unlinkSync(msdaeurekaOnPollingSignal);
-            }
-        });
-    } catch(err) {
-        logger.fine("MSDAeureka: OnStart, hits error while check pooling signal. ", err.message);
-    }
  
     success();
 };
@@ -148,6 +134,22 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
     const inputMonitor = inputProperties.healthMonitor.value;
     var pollInterval = dataProperties.pollInterval.value * 1000;
 
+    // Check the existence of the pool in BIG-IP, create an empty pool if the pool doesn't exist.
+    mytmsh.executeCommand("tmsh -a list ltm pool " + inputPoolName)
+    .then(function () {
+        logger.fine("MSDA: onPost, found the pool, no need to create an empty pool.");
+        return;
+    }, function (error) {
+        logger.fine("MSDA: onPost, GET of pool failed, adding an empty pool: " + inputPoolName);
+        let inputEmptyPoolConfig = inputPoolName + ' monitor ' + inputMonitor + ' load-balancing-mode ' + inputPoolType + ' members none';
+        let commandCreatePool = 'tmsh -a create ltm pool ' + inputEmptyPoolConfig;
+        return mytmsh.executeCommand(commandCreatePool);
+    })
+    .catch(function (error) {
+        logger.fine("MSDA: onPost, list pool failed: " + error.message);
+    });
+
+
     // Set the polling interval
     if (pollInterval) {
         if (pollInterval < 10000) {
@@ -160,16 +162,16 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
     }
     
     // Setup the polling signal for audit
-    try {
-        logger.fine("MSDAeureka: onPost, will set the polling signal. ");
-        fs.writeFile(msdaeurekaOnPollingSignal, '');
-    } catch (error) {
-        logger.fine("MSDAeureka: onPost, hit error while set polling signal: ", error.message);
+    if (global.msdaeurekaOnPolling.includes(inputPoolName)) {
+        return logger.fine("MSDA: onPost, already has an instance polling the same pool, please check it out: " + inputPoolName);
+    } else { 
+        global.msdaeurekaOnPolling.push(inputPoolName);
+        logger.fine("MSDA onPost: set msdaeurekaOnpolling signal: ", global.msdaeurekaOnPolling);
     }
 
-    logger.fine("MSDA: onPost, Input properties accepted, change to BOUND status, start to poll Registry.");
+    logger.fine("MSDA: onPost, Input properties accepted, change to BOUND status, start to poll Registry for: " + inputPoolName);
 
-    stopPolling = false;
+    //stopPolling = false;
 
     configTaskUtil.sendPatchToBoundState(configTaskState, 
             oThis.getUri().href, restOperation.getBasicAuthorization());
@@ -231,15 +233,24 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
 
                     } else {
                         //To clear the pool
-                        console.log("MSDA: onPost, endpoint list is empty, will clear the BIG-IP pool as well");
-                        const commandDeletePool = 'tmsh -a delete ltm pool ' + inputPoolName;
-                        mytmsh.executeCommand(commandDeletePool)
-                        .then (function () {
-                            logger.fine("MSDA: onPost, the pool is deleted as it's empty.");
-                        })
-                            // Error handling
-                        .catch(function (err) {
-                            logger.fine("MSDA: onPost, empty pool Delete failed: " + err.message);
+                        logger.fine("MSDA: onPost, endpoint list is empty, will clear the BIG-IP pool as well");
+                        mytmsh.executeCommand("tmsh -a list ltm pool " + inputPoolName)
+                            .then(function () {
+                                logger.fine("MSDA: onPost, found the pool, will delete all members as it's empty.");
+                                let commandUpdatePool = 'tmsh -a modify ltm pool ' + inputPoolName + ' members delete { all}';
+                                return mytmsh.executeCommand(commandUpdatePool)
+                                    .then(function (response) {
+                                        logger.fine("MSDA: onPost, update the pool to delete all members as it's empty. ");
+                                    });
+                            }, function (error) {
+                                logger.fine("MSDA: onPost, GET of pool failed, adding an empty pool: " + inputPoolName);
+                                let inputEmptyPoolConfig = inputPoolName + ' monitor ' + inputMonitor + ' load-balancing-mode ' + inputPoolType + ' members none';
+                                let commandCreatePool = 'tmsh -a create ltm pool ' + inputEmptyPoolConfig;
+                                return mytmsh.executeCommand(commandCreatePool);
+                            })
+                                // Error handling - Set the block as 'ERROR'
+                            .catch(function (error) {
+                                logger.fine("MSDA: onPost, Delete failed: " + error.message);
                             });
                     }
                 }, function (err) {
@@ -250,22 +261,24 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
             schedule();
         }, pollInterval);
 
-        // Stop polling while undepllyment
-        if (stopPolling) {
+        // Stop polling while undeployment
+        if (global.msdaeurekaOnPolling.includes(inputPoolName)) {
+            logger.fine("MSDA: onPost, keep polling registry  for: " + inputPoolName);            
+        } else {
             process.nextTick(() => {
                 clearTimeout(pollRegistry);
-                logger.fine("MSDA: onPost/stopping, Stop polling registry ...");
+                logger.fine("MSDA: onPost/stopping, Stop polling registry  for: " + inputPoolName);
             });
             // Delete pool configuration in case it still there.
             setTimeout (function () {
                 const commandDeletePool = 'tmsh -a delete ltm pool ' + inputPoolName;
                 mytmsh.executeCommand(commandDeletePool)
                 .then (function () {
-                    logger.fine("MSDA: onPost/stopping, the pool removed");
+                    logger.fine("MSDA: onPost/stopping, the pool removed: " + inputPoolName);
                 })
                     // Error handling
                 .catch(function (err) {
-                    logger.fine("MSDA: onPost/stopping, Delete failed: " + err.message);
+                    logger.fine("MSDA: onPost/stopping, Delete failed: " + inputPoolName + err.message);
                 });
             }, 2000);
         }
@@ -312,11 +325,11 @@ msdaeurekaConfigProcessor.prototype.onDelete = function (restOperation) {
 
     mytmsh.executeCommand("tmsh -a list ltm pool " + inputProperties.poolName.value)
         .then(function () {
-            logger.fine("MSDA: onDelete, delete Found a pre-existing pool. Full Config Delete");
+            logger.fine("MSDA: onDelete, delete Found a pre-existing pool. Full Config Delete: " + inputProperties.poolName.value);
             const commandDeletePool = 'tmsh -a delete ltm pool ' + inputProperties.poolName.value;
             return mytmsh.executeCommand(commandDeletePool)
                 .then (function (response) {
-                    logger.fine("MSDA: onDelete, the pool removed");
+                    logger.fine("MSDA: onDelete, the pool removed: " + inputProperties.poolName.value);
                     configTaskUtil.sendPatchToUnBoundState(configTaskState,
                         oThis.getUri().href, restOperation.getBasicAuthorization());
                     });
@@ -331,14 +344,23 @@ msdaeurekaConfigProcessor.prototype.onDelete = function (restOperation) {
             logger.fine("MSDA: onDelete, Delete failed, setting block to ERROR: " + error.message);
             configTaskUtil.sendPatchToErrorState(configTaskState, error,
                 oThis.getUri().href, restOperation.getBasicAuthorization());
-        });
+        })
         // Always called, no matter the disposition. Also handles re-throwing internal exceptions.
+        .done(function () {
+            logger.fine("MSDA: onDelete, delete DONE!!! Continue to clear the polling signal for: : " + inputProperties.poolName.value);  // happens regardless of errors or no errors ....
+            // Delete the polling signal
+            let signalIndex = global.msdaeurekaOnPolling.indexOf(inputProperties.poolName.value);
+            global.msdaeurekaOnPolling.splice(signalIndex,1);
+        });
+    
+    /*
     // Stop polling registry while undeploy ??
     process.nextTick(() => {
         stopPolling = true;
         logger.fine("MSDA: onDelete/stopping, Stop polling registry ...");
     });
     //stopPollingEvent.emit('stopPollingRegistry');
+    */
     logger.fine("MSDA: onDelete, Stop polling Registry while ondelete action.");
 };
 
