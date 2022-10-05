@@ -1,7 +1,7 @@
 Summary: F5 Basic iApp
 Name: f5-iapplx-msda-eureka
-Version: 0.0.3
-Release: 0004
+Version: 0.0.4
+Release: 0001
 BuildArch: noarch
 Group: Development/Libraries
 License: Commercial
