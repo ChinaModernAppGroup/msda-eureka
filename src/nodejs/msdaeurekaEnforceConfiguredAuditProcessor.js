@@ -13,7 +13,12 @@
   language governing permissions and limitations under the License.
 
   Updated by Ping Xiong on May/15/2022
-
+  Updated by Ping Xiong on Oct/05/2022, modify the polling signal into a json object to keep more information.
+  let blockInstance = {
+    name: "instanceName", // a block instance of the iapplx config
+    state: "polling", // can be "polling" for normal running state; "update" to modify the iapplx config
+    bigipPool: "/Common/samplePool"
+  }
 */
 
 'use strict';
@@ -91,9 +96,9 @@ msdaeurekaEnforceConfiguredAuditProcessor.prototype.onPost = function (restOpera
                 //  "authenticationCert",
                 //  "nameSpace",
                 //  "serviceName",
-                "poolName",
-                "poolType",
-                "healthMonitor",
+                "poolName"
+                //"poolType",
+                //"healthMonitor",
                 ]
             );
 
@@ -103,37 +108,42 @@ msdaeurekaEnforceConfiguredAuditProcessor.prototype.onPost = function (restOpera
             logger.fine("MSDA eureka Audit: msdaeureka poolName: ", blockInputProperties.poolName.value);
 
             if (
-                global.msdaeurekaOnPolling.includes(blockInputProperties.poolName.value)
+              global.msdaeurekaOnPolling.some(
+                (instance) =>
+                    instance.bigipPool === blockInputProperties.poolName.value
+              )
             ) {
                 logger.fine(
-                "MSDA eureka audit onPost: ConfigProcessor is on polling state, no need to fire an onPost."
+                    "MSDA eureka audit onPost: ConfigProcessor is on polling state, no need to fire an onPost.",
+                    blockInputProperties.poolName.value
                 );
             } else {
                 logger.fine(
-                "MSDA eureka audit onPost: ConfigProcessor is NOT on polling state, will trigger ConfigProcessor onPost."
+                    "MSDA eureka audit onPost: ConfigProcessor is NOT on polling state, will trigger ConfigProcessor onPost.",
+                    blockInputProperties.poolName.value
                 );
                 try {
-                var poolNameObject = getObjectByID(
+                    var poolNameObject = getObjectByID(
                     "poolName",
                     auditTaskState.currentInputProperties
-                );
-                poolNameObject.value = null;
-                oThis.finishOperation(restOperation, auditTaskState);
-                logger.fine(
-                    "MSDA eureka audit onPost: trigger ConfigProcessor onPost "
-                );
+                    );
+                    poolNameObject.value = null;
+                    oThis.finishOperation(restOperation, auditTaskState);
+                    logger.fine(
+                        "MSDA eureka audit onPost: trigger ConfigProcessor onPost "
+                    );
                 } catch (err) {
-                logger.fine(
-                    "MSDA eureka audit onPost: Failed to send out restOperation. ",
-                    err.message
-                );
+                    logger.fine(
+                        "MSDA eureka audit onPost: Failed to send out restOperation. ",
+                        err.message
+                    );
                 }
             }
         } catch (ex) {
             logger.fine("msdaeurekaEnforceConfiguredAuditProcessor.prototype.onPost caught generic exception " + ex);
             restOperation.fail(ex);
         }
-    }, 1000)
+    }, 2000)
 };
 
 var getObjectByID = function ( key, array) {
