@@ -20,6 +20,7 @@
     state: "polling", // can be "polling" for normal running state; "update" to modify the iapplx config
     bigipPool: "/Common/samplePool"
   }
+  Jan/11/2023, updated by Ping Xiong, compare the pool member list before updating config.
 */
 
 'use strict';
@@ -81,7 +82,40 @@ msdaeurekaConfigProcessor.prototype.onStart = function (success) {
         eventChannel: this.eventChannel,
         restHelper: this.restHelper
     });
- 
+
+    // Check the db key bigpipe.displayservicenames, modify it into false for comparing pool member list.
+    mytmsh.executeCommand("tmsh -a list sys db bigpipe.displayservicenames")
+    .then(function (result) {
+        if (result.indexOf("true") > -1) {
+            logger.fine(
+                "MSDA: onStart, bigpipe.displayservicenames is true, will modify it into false."
+            );
+            return mytmsh
+                .executeCommand(
+                "tmsh -a modify sys db bigpipe.displayservicenames value false"
+                )
+                .then(function () {
+                logger.fine(
+                    "MSDA: onStart, updated bigpipe.displayservicenames into false."
+                );
+                });
+        } else {
+            return logger.fine(
+              "MSDA: onStart, bigpipe.displayservicenames is false, no change needed."
+            );
+        }
+    }, function () {
+        return logger.fine(
+            "MSDA: onStart, fail to list the db key bigpipe.displayservicenames."
+        );
+    })
+    .catch(function (error) {
+        logger.fine(
+          "MSDA: onStart, fail to list the db key bigpipe.displayservicenames. ",
+          error.message
+        );
+    });
+
     success();
 };
 
@@ -250,6 +284,29 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
 
     // A internal service to retrieve service member information from registry, and then update BIG-IP setting.
 
+    // Define functions to compare pool members
+
+    function getPoolMembers(result) {
+        const lines = result.split("\n");
+        let poolMembers = [];
+        lines.forEach((line, i) => {
+            if (line.indexOf("address") > -1) {
+            let memberLine = lines[i - 1];
+            memberLine = memberLine.trim();
+            memberLine = memberLine.split(" ");
+            poolMembers.push(memberLine[0]);
+            }
+        });
+        return poolMembers;
+    }
+
+    function compareArray(array1, array2) {
+        return (
+            array1.length === array2.length &&
+            array1.every((item) => array2.indexOf(item) > -1)
+        );
+    }
+
     //inputEndPoint = inputEndPoint.toString().split(","); 
     logger.fine(
         "MSDA: onPost, " + instanceName + " registry endpoints: ",
@@ -343,15 +400,34 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
                         // Use tmsh to update BIG-IP configuration instead of restful API
 
                         // Start with check the exisitence of the given pool
-                        mytmsh.executeCommand("tmsh -a list ltm pool " + inputPoolName).then(function () {
+                        mytmsh.executeCommand("tmsh -a list ltm pool " + inputPoolName).then(function (result) {
+                            // Get pool members from list result
+                            let poolMembersArray = getPoolMembers(result);
                             logger.fine(
                                 "MSDA: onPost, " +
                                 instanceName +
-                                " Found a pre-existing pool. Update pool setting: ",
-                                inputPoolName
+                                " Found a pre-existing pool: " +
+                                inputPoolName + " has members: ",
+                                poolMembersArray
                             );
-                            let commandUpdatePool = 'tmsh -a modify ltm pool ' + inputPoolConfig;
-                            return mytmsh.executeCommand(commandUpdatePool);
+
+                            if (compareArray(nodeAddress, poolMembersArray)) {
+                                return logger.fine(
+                                  "MSDA: onPost, " +
+                                    instanceName +
+                                    " Existing pool has the same member list as service registry, will not update the BIG-IP config. ",
+                                    inputPoolName
+                                );
+                            } else {
+                                logger.fine(
+                                  "MSDA: onPost, " +
+                                    instanceName +
+                                    " Existing pool has the different member list compare to service registry, will update the BIG-IP config. ",
+                                  inputPoolName
+                                );
+                                let commandUpdatePool = "tmsh -a modify ltm pool " + inputPoolConfig;
+                                return mytmsh.executeCommand(commandUpdatePool);
+                            }
                         }, function (error) {
                             logger.fine(
                                 "MSDA: onPost, " +
@@ -380,21 +456,41 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
                             " endpoint list is empty, will clear the BIG-IP pool as well"
                         );
                         mytmsh.executeCommand("tmsh -a list ltm pool " + inputPoolName)
-                            .then(function () {
+                            .then(function (result) {
+                                // Get pool members from list result
+                                let poolMembersArray = getPoolMembers(result);
                                 logger.fine(
                                     "MSDA: onPost, " +
                                     instanceName +
-                                    " found the pool, will delete all members as it's empty."
+                                    " found the pool, will delete all members as it's empty.",
+                                    poolMembersArray
                                 );
-                                let commandUpdatePool = 'tmsh -a modify ltm pool ' + inputPoolName + ' members delete { all}';
-                                return mytmsh.executeCommand(commandUpdatePool)
-                                    .then(function (response) {
+
+                                if (poolMembersArray.length == 0) {
+                                    return logger.fine(
+                                      "MSDA: onPost, " +
+                                        instanceName +
+                                        " Existing pool has the same member list as service registry, will not update the BIG-IP config. ",
+                                      inputPoolName
+                                    );
+                                } else {
+                                    logger.fine(
+                                      "MSDA: onPost, " +
+                                        instanceName +
+                                        " Existing pool has the different member list compare to service registry, will update the BIG-IP config. ",
+                                      inputPoolName
+                                    );
+                                    let commandUpdatePool = 'tmsh -a modify ltm pool ' + inputPoolName + ' members delete { all}';
+                                    return mytmsh
+                                      .executeCommand(commandUpdatePool)
+                                      .then(function () {
                                         logger.fine(
-                                            "MSDA: onPost, " +
+                                          "MSDA: onPost, " +
                                             instanceName +
                                             " update the pool to delete all members as it's empty. "
                                         );
-                                    });
+                                      });
+                                }
                             }, function (error) {
                                 logger.fine(
                                     "MSDA: onPost, " +
