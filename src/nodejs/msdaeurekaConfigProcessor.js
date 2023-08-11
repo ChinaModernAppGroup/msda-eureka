@@ -18,10 +18,12 @@
   let blockInstance = {
     name: "instanceName", // a block instance of the iapplx config
     state: "polling", // can be "polling" for normal running state; "update" to modify the iapplx config
+    bigipPoolChange: false, // Add a signal for bigip pool change update
     bigipPool: "/Common/samplePool"
   }
   Jan/11/2023, updated by Ping Xiong, compare the pool member list before updating config.
   Mar/09/2023, updated by Ping Xiong, update delta of pool members instead of replace-all-with latest config.
+  Aug/11/2023, updated by Ping Xiong, update config will not delete the pool unless the pool changed.
 */
 
 'use strict';
@@ -183,9 +185,11 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
         logger.fine(
             "MSDA: onPost, " +
             instanceName +
-            " found the pool, no need to create an empty pool."
+            " found the pool, no need to create an empty pool, but update the pool configure."
         );
-        return;
+        let inputExistingPoolConfig = inputPoolName + ' monitor ' + inputMonitor + ' load-balancing-mode ' + inputPoolType;
+        let commandModifyPool = 'tmsh -a modify ltm pool ' + inputExistingPoolConfig;
+        return mytmsh.executeCommand(commandModifyPool);
     }, function (error) {
         logger.fine(
             "MSDA: onPost, " +
@@ -231,11 +235,17 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
     let blockInstance = {
         name: instanceName,
         bigipPool: inputPoolName,
+        // Add signal for bigip pool change update
+        bigipPoolChange: false,
         state: "polling"
     };
 
     let signalIndex = global.msdaeurekaOnPolling.findIndex(instance => instance.name === instanceName);
     if (signalIndex !== -1) {
+        //Already has the instance, set the pool change signal if the pool changed
+        blockInstance.bigipPoolChange =
+            global.msdaeurekaOnPolling[signalIndex].bigipPool !== inputPoolName;
+        
         // Already has the instance, change the state into "update"
         global.msdaeurekaOnPolling.splice(signalIndex, 1);
         blockInstance.state = "update";
@@ -608,35 +618,55 @@ msdaeurekaConfigProcessor.prototype.onPost = function (restOperation) {
                     inputPoolName
                 );
             });
-            // Delete pool configuration in case it still there.
-            setTimeout (function () {
-                const commandDeletePool = 'tmsh -a delete ltm pool ' + inputPoolName;
-                mytmsh.executeCommand(commandDeletePool)
-                .then (function () {
+            // Delete pool configuration if the pool name changed.
+
+            if (
+                global.msdaeurekaOnPolling.some(
+                    (instance) => instance.name === instanceName
+                )
+            ) {
+                let signalIndex = global.msdaeurekaOnPolling.findIndex(
+                    (instance) => instance.name === instanceName
+                );
+                if (global.msdaeurekaOnPolling[signalIndex].bigipPoolChange === true) {
                     logger.fine(
-                        "MSDA: onPost/stopping, " +
+                    "MSDA: onPost, " +
                         instanceName +
-                        " the pool removed: " +
-                        inputPoolName
+                        " BigipPool Changed, will delete previous pool for : ",
+                    inputServiceName
                     );
-                })
-                    // Error handling
-                .catch(function (err) {
-                    logger.fine(
-                        "MSDA: onPost/stopping, " +
-                        instanceName +
-                        " Delete failed: " +
-                        inputPoolName,
-                        err.message
-                    );
-                }).done(function () {
-                    return logger.fine(
-                        "MSDA: onPost/stopping, " +
-                        instanceName +
-                        " exit loop."
-                    );
-                });
-            }, 2000);
+
+                    setTimeout (function () {
+                        const commandDeletePool = 'tmsh -a delete ltm pool ' + inputPoolName;
+                        mytmsh.executeCommand(commandDeletePool)
+                        .then (function () {
+                            logger.fine(
+                                "MSDA: onPost/stopping, " +
+                                instanceName +
+                                " the pool removed: " +
+                                inputPoolName
+                            );
+                        })
+                            // Error handling
+                        .catch(function (err) {
+                            logger.fine(
+                                "MSDA: onPost/stopping, " +
+                                instanceName +
+                                " Delete failed: " +
+                                inputPoolName,
+                                err.message
+                            );
+                        }).done(function () {
+                            global.msdaeurekaOnPolling[signalIndex].bigipPoolChange = false;
+                            return logger.fine(
+                                "MSDA: onPost/stopping, " +
+                                instanceName +
+                                " exit loop."
+                            );
+                        });
+                    }, 2000);
+                };
+            }
         }
     })();
 };
